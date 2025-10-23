@@ -1,14 +1,20 @@
 package org.example;
 import javax.swing.*;
+import javax.swing.text.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.net.*;
 import java.util.concurrent.Executors;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import javax.imageio.ImageIO;
+import java.util.Base64;
 
 public class Main extends JFrame {
-    private JTextArea chatArea;
+    private JTextPane chatPane;
     private JTextField messageField;
-    private JButton sendButton;
+    private JButton sendButton, sendImageButton;
     private JList<String> clientList;
     private DefaultListModel<String> listModel;
 
@@ -21,12 +27,12 @@ public class Main extends JFrame {
         super("UDP Chat Client - " + username);
         this.username = username;
 
-        setSize(700, 400);
+        setSize(750, 450);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
 
-        chatArea = new JTextArea();
-        chatArea.setEditable(false);
-        JScrollPane chatScroll = new JScrollPane(chatArea);
+        chatPane = new JTextPane();
+        chatPane.setEditable(false);
+        JScrollPane chatScroll = new JScrollPane(chatPane);
 
         listModel = new DefaultListModel<>();
         clientList = new JList<>(listModel);
@@ -37,16 +43,19 @@ public class Main extends JFrame {
         JPanel bottomPanel = new JPanel(new BorderLayout());
         messageField = new JTextField();
         sendButton = new JButton("Send");
+        sendImageButton = new JButton("Send Image");
+        bottomPanel.add(sendImageButton, BorderLayout.WEST);
         bottomPanel.add(messageField, BorderLayout.CENTER);
         bottomPanel.add(sendButton, BorderLayout.EAST);
 
         JSplitPane splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, chatScroll, listScroll);
-        splitPane.setDividerLocation(500);
+        splitPane.setDividerLocation(580);
         add(splitPane, BorderLayout.CENTER);
         add(bottomPanel, BorderLayout.SOUTH);
 
         sendButton.addActionListener(this::sendMessage);
         messageField.addActionListener(this::sendMessage);
+        sendImageButton.addActionListener(e -> sendImage());
 
         setVisible(true);
         startClient();
@@ -57,11 +66,11 @@ public class Main extends JFrame {
             socket = new DatagramSocket();
             serverAddress = InetAddress.getByName("localhost");
 
-            // Announce presence to server
+            // Announce presence
             sendPacket(username + ":JOIN");
 
             Executors.newSingleThreadExecutor().execute(() -> {
-                byte[] buffer = new byte[1024];
+                byte[] buffer = new byte[65507]; // Max UDP packet size
                 while (true) {
                     try {
                         DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
@@ -70,8 +79,22 @@ public class Main extends JFrame {
 
                         if (received.startsWith("CLIENT_LIST:")) {
                             SwingUtilities.invokeLater(() -> updateClientList(received.substring(12)));
+                        }
+                        else if (received.startsWith("IMAGE:")) {
+                            String[] parts = received.split(":", 4);
+                            if (parts.length == 4) {
+                                String sender = parts[2];
+                                String base64Data = parts[3];
+
+                                byte[] imgBytes = Base64.getDecoder().decode(base64Data);
+                                ByteArrayInputStream bais = new ByteArrayInputStream(imgBytes);
+                                BufferedImage img = ImageIO.read(bais);
+                                ImageIcon icon = new ImageIcon(img);
+
+                                appendImageMessage(sender, icon);
+                            }
                         } else {
-                            chatArea.append(received + "\n");
+                            appendMessage(received);
                         }
                     } catch (Exception e) {
                         e.printStackTrace();
@@ -87,7 +110,7 @@ public class Main extends JFrame {
     private void updateClientList(String listStr) {
         String[] users = listStr.split(",");
         listModel.clear();
-        listModel.addElement("All"); // broadcast option
+        listModel.addElement("All"); // broadcast
         for (String u : users) {
             if (!u.equals(username)) listModel.addElement(u);
         }
@@ -99,11 +122,38 @@ public class Main extends JFrame {
             if (!message.isEmpty()) {
                 String target = clientList.getSelectedValue();
                 if (target == null || target.equals("All")) {
-                    sendPacket(username + ": " + message); // broadcast
+                    sendPacket(username + ": " + message);
                 } else {
-                    sendPacket("PRIVATE:" + target + ":" + username + ": " + message); // private
+                    sendPacket("PRIVATE:" + target + ":" + username + ": " + message);
                 }
                 messageField.setText("");
+            }
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
+    }
+
+    private void sendImage() {
+        try {
+            JFileChooser chooser = new JFileChooser();
+            int result = chooser.showOpenDialog(this);
+            if (result == JFileChooser.APPROVE_OPTION) {
+                java.io.File file = chooser.getSelectedFile();
+                BufferedImage img = ImageIO.read(file);
+
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                ImageIO.write(img, "png", baos);
+                String encodedImage = Base64.getEncoder().encodeToString(baos.toByteArray());
+
+                String target = clientList.getSelectedValue();
+                String message;
+                if (target == null || target.equals("All")) {
+                    message = "IMAGE:ALL:" + username + ":" + encodedImage;
+                } else {
+                    message = "IMAGE:" + target + ":" + username + ":" + encodedImage;
+                }
+
+                sendPacket(message);
             }
         } catch (Exception ex) {
             ex.printStackTrace();
@@ -113,6 +163,42 @@ public class Main extends JFrame {
     private void sendPacket(String message) throws Exception {
         DatagramPacket packet = new DatagramPacket(message.getBytes(), message.length(), serverAddress, SERVER_PORT);
         socket.send(packet);
+    }
+
+    // Append text message with color for private
+    private void appendMessage(String message) {
+        try {
+            StyledDocument doc = chatPane.getStyledDocument();
+            Style style = chatPane.addStyle("Style", null);
+            if (message.startsWith("[Private]")) {
+                StyleConstants.setForeground(style, Color.RED);
+            } else {
+                StyleConstants.setForeground(style, Color.BLACK);
+            }
+            doc.insertString(doc.getLength(), message + "\n", style);
+            chatPane.setCaretPosition(doc.getLength());
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void appendImageMessage(String sender, ImageIcon icon) {
+        try {
+            StyledDocument doc = chatPane.getStyledDocument();
+            chatPane.setCaretPosition(doc.getLength());
+
+            Style style = chatPane.addStyle("Style", null);
+            StyleConstants.setBold(style, true);
+            doc.insertString(doc.getLength(), sender + " sent an image:\n", style);
+
+            chatPane.setCaretPosition(doc.getLength());
+            chatPane.insertIcon(icon);
+
+            doc.insertString(doc.getLength(), "\n", null);
+            chatPane.setCaretPosition(doc.getLength());
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
     public static void main(String[] args) {
